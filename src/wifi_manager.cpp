@@ -3,13 +3,17 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
-const char *ssid = "Flia_pardo_alfonso";
-const char *password = "P4Rd041F0Nn50";
+const char *ssid = "LaptopJesus";
+const char *password = "1234567Aa";
 
 
 void iniciarWifi(){
     Serial.println("Iniciando Wifi");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);   // Evita microcortes por ahorro de energía
     WiFi.begin(ssid, password);
+
     validarConexionWiFi();
 }
 

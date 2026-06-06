@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
+#include "main.h"
 #include <Arduino.h>
 #include <ESP32Servo.h>
 
@@ -21,7 +22,7 @@ Servo cabeza;
 // // Pines de los Seguidores de Línea
 #define SENSOR_LINEA_IZQ 14
 #define SENSOR_LINEA_DER 27
-const int LINEA_ACTIVA = LOW; // Cambia a HIGH si tus sensores devuelven HIGH al detectar la línea
+const int LINEA_ACTIVA = HIGH; // Cambia a HIGH si tus sensores devuelven HIGH al detectar la línea
 
 // // Pin del Servo S90
 #define PIN_SERVO 5
@@ -32,8 +33,8 @@ const int LINEA_ACTIVA = LOW; // Cambia a HIGH si tus sensores devuelven HIGH al
 
 // Pines Motor A
 #define ENA 18
-#define IN1 19
-#define IN2 21
+#define IN1 21
+#define IN2 19
 
 // Pines Motor B
 #define ENB 25
@@ -59,6 +60,7 @@ const int DERECHA = 85;
 const int IZQUIERDA = 15;
 const int VELOCIDAD_MINIMA_LINEA = 160;
 const int VELOCIDAD_GIRO_LINEA = 120;
+const float COMPENSACION_MOTOR_DERECHO = 1.10; // Reduce ligeramente el motor derecho para compensar deriva hacia la derecha
 
 // Variables globales
 float distanciaFrente = 0;
@@ -68,27 +70,15 @@ bool left = false;
 bool right = false;
 bool movimiento = true;
 
-// Prototipos de funciones
-float mirarAlFrente();
-float medirDistancia();
-int mirarIzquierda();
-int mirarDerecha();
-void avanzar();
-void retroceder();
-void girarDerecha();
-void girarIzquierda();
-void detener();
-void modoSeguidorLinea();
-void debugSensorIzquierdo();
-void debugSensorDerecho();
-void modoEvaSorObstaculos();
-void modoManual();
-void modoEvasor();
-void cambiarVelocidad(int vel);
-void aplicarVelocidad(int speed);
-void aplicarVelocidadMotores(int speedA, int speedB);
-void girarIzquierdaSuave();
-void girarDerechaSuave();
+// Estado de búsqueda cuando se pierde la línea
+unsigned long searchStartMillis = 0;
+unsigned long searchPhaseStart = 0;
+int searchPhase = 0; // 0 = arco a la derecha, 1 = avance corto
+const unsigned long SEARCH_TIMEOUT_MS = 1200; // tiempo máximo buscando antes de intentar avanzar
+const unsigned long ARC_DURATION_MS = 150;     // duración del arco a la derecha
+const unsigned long FORWARD_DURATION_MS = 200; // duración del avance corto
+
+
 
 void setup()
 {
@@ -96,10 +86,10 @@ void setup()
   Serial.println("--- Inicializando Robot ESP32 ---");
 
   // Configuración de pines de motores
-  pinMode(ENA, OUTPUT);
+  // pinMode(ENA, OUTPUT);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
-  pinMode(ENB, OUTPUT);
+  // pinMode(ENB, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
 
@@ -137,149 +127,164 @@ void setup()
   {
     Serial.println("¡Sistema Listo! MODO: Manual Activo.");
   }
+
+  // cambiarVelocidad(80); // Velocidad inicial al 50%
+  // while(true)
+  //   {
+  //       Serial.println("Prueba adelante");
+  //       avanzar();
+  //       delay(3000);
+
+  //       Serial.println("Prueba adelante");
+  //       retroceder();
+  //       delay(3000);
+
+  //   }
 }
 
 void loop()
 {
   validarConexionMQTT();
 
-  // Aplicar velocidad constantemente si hay movimiento
-  if (movimiento)
-  {
-    aplicarVelocidad(VELOCIDAD);
-  }
-
-  // Ejecutar el modo correspondiente
   if (MODO_ACTUAL == EVASOR)
-  {
     modoEvaSorObstaculos();
-  }
   else if (MODO_ACTUAL == SEGUIDOR)
-  {
     modoSeguidorLinea();
-  }
-  else if (MODO_ACTUAL == DEBUG_SENSOR_IZQ)
-  {
-    debugSensorIzquierdo();
-  }
-  else if (MODO_ACTUAL == DEBUG_SENSOR_DER)
-  {
-    debugSensorDerecho();
-  }
-  else
-  {
-    modoManual();
-  }
 
-  delay(10); // Pausa de estabilidad para los motores
+  int lineaIzq = digitalRead(SENSOR_LINEA_IZQ);
+
+  Serial.print("Sensor Izquierdo: ");
+  Serial.println(lineaIzq);
+
+  delay(10);
 }
-
 // ============================================================================
 // LÓGICA MODO 1: SEGUIDOR DE LÍNEA PURO
 // ============================================================================
 void modoSeguidorLinea()
 {
   int lineaIzq = digitalRead(SENSOR_LINEA_IZQ);
-  int lineaDer = digitalRead(SENSOR_LINEA_DER);
-
-  bool izquierdaDetecta = lineaIzq == LINEA_ACTIVA;
-  bool derechaDetecta = lineaDer == LINEA_ACTIVA;
-
-  // DEBUG: descomenta si necesitas ver los valores de los sensores
-  // Serial.print("IZQ="); Serial.print(lineaIzq);
-  // Serial.print(" DER="); Serial.println(lineaDer);
-
-  // El sensor derecho es el principal para seguir la línea.
-  if (derechaDetecta)
-  {
-    avanzar();
-  }
-  else if (izquierdaDetecta)
-  {
-    // El izquierdo solo ayuda a corregir la ruta cuando se pierde el lineamiento derecho.
-    girarIzquierdaSuave();
-  }
-  else
-  {
-    // Línea perdida: buscar la línea girando poco a la derecha
-    // para tratar de volver a colocarla bajo el sensor principal.
-    Serial.println("Línea perdida: buscando con el derecho...");
-    girarDerechaSuave();
-  }
-}
-
-// ============================================================================
-// FUNCIONES DE DIAGNÓSTICO PARA SENSORES
-// ============================================================================
-void debugSensorIzquierdo()
-{
-  int lineaIzq = digitalRead(SENSOR_LINEA_IZQ);
   bool izquierdaDetecta = lineaIzq == LINEA_ACTIVA;
 
-  Serial.print("DEBUG IZQ: valor="); Serial.print(lineaIzq);
-  Serial.print(" detecta="); Serial.println(izquierdaDetecta ? "SÍ" : "NO");
+  // DEBUG: muestra el valor del sensor izquierdo
+  Serial.print("IZQ="); Serial.println(lineaIzq);
 
+  int velocidadSeguidor = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+  if (velocidadSeguidor < VELOCIDAD_MINIMA_LINEA)
+  {
+    velocidadSeguidor = VELOCIDAD_MINIMA_LINEA;
+  }
+
+  // Si detecta la línea, avanzar y resetear búsqueda
   if (izquierdaDetecta)
   {
-    avanzar();
+    searchStartMillis = 0;
+    searchPhase = 0;
+    avanzar(velocidadSeguidor);
+    return;
   }
-  else
+
+  // Si no detecta, entrar en modo búsqueda no bloqueante
+  unsigned long now = millis();
+  if (searchStartMillis == 0)
   {
-    detener();
+    searchStartMillis = now;
+    searchPhaseStart = now;
+    searchPhase = 0;
   }
-}
 
-void debugSensorDerecho()
-{
-  int lineaDer = digitalRead(SENSOR_LINEA_DER);
-  bool derechaDetecta = lineaDer == LINEA_ACTIVA;
-
-  Serial.print("DEBUG DER: valor="); Serial.print(lineaDer);
-  Serial.print(" detecta="); Serial.println(derechaDetecta ? "SÍ" : "NO");
-
-  if (derechaDetecta)
+  unsigned long elapsed = now - searchStartMillis;
+  if (elapsed > SEARCH_TIMEOUT_MS)
   {
-    avanzar();
+    // Timeout: avanzar un poco hacia adelante y reintentar
+    Serial.println("Busqueda timeout: avance corto para reintentar");
+    avanzar(VELOCIDAD_MINIMA_LINEA);
+    // resetear estado de búsqueda para la próxima iteración
+    searchStartMillis = 0;
+    searchPhase = 0;
+    return;
   }
-  else
+
+  // Alternar entre arco a la derecha y avance corto para permitir
+  // que el sensor pase por encima de la línea pese a la deriva.
+  if (searchPhase == 0)
   {
-    detener();
+    if (now - searchPhaseStart < ARC_DURATION_MS)
+    {
+      // Arco a la derecha: ambos motores hacia adelante, derecho más lento
+      aplicarVelocidadMotores(velocidadSeguidor, constrain((int)(velocidadSeguidor * COMPENSACION_MOTOR_DERECHO * 0.6), 0, 255));
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, HIGH);
+      digitalWrite(IN4, LOW);
+      return;
+    }
+    else
+    {
+      searchPhase = 1;
+      searchPhaseStart = now;
+    }
+  }
+
+  if (searchPhase == 1)
+  {
+    if (now - searchPhaseStart < FORWARD_DURATION_MS)
+    {
+      // avance corto hacia adelante
+      avanzar(VELOCIDAD_MINIMA_LINEA);
+      return;
+    }
+    else
+    {
+      searchPhase = 0;
+      searchPhaseStart = now;
+    }
   }
 }
 
 // ============================================================================
 // LÓGICA MODO 2: EVASOR DE OBSTÁCULOS PURO
 // ============================================================================
-void modoEvaSorObstaculos() {
+void modoEvaSorObstaculos()
+{
   distanciaFrente = mirarAlFrente();
 
-  if (distanciaFrente > 0 && distanciaFrente <= DISTANCIA_FRENADO) {
+  if (distanciaFrente > 0 && distanciaFrente <= DISTANCIA_FRENADO)
+  {
     detener();
     delay(DELAY_DETENIDO);
 
     // Evaluar lado izquierdo
     distanciaIzquierda = mirarIzquierda();
-    if (distanciaIzquierda > DISTANCIA_FRENADO && !left) {
+    if (distanciaIzquierda > DISTANCIA_FRENADO && !left)
+    {
       girarIzquierda();
       delay(DELAY_GIRO);
       detener();
       delay(DELAY_DETENIDO);
-      left = false; right = false; // Resetear banderas
-      return; 
-    } else {
+      left = false;
+      right = false; // Resetear banderas
+      return;
+    }
+    else
+    {
       left = true;
     }
 
     // Evaluar lado derecho
     distanciaDerecha = mirarDerecha();
-    if (distanciaDerecha > DISTANCIA_FRENADO && !right) {
+    if (distanciaDerecha > DISTANCIA_FRENADO && !right)
+    {
       girarDerecha();
       delay(DELAY_GIRO);
       detener();
       delay(DELAY_DETENIDO);
-      left = false; right = false; // Resetear banderas
+      left = false;
+      right = false; // Resetear banderas
       return;
-    } else {
+    }
+    else
+    {
       right = true;
     }
 
@@ -288,13 +293,14 @@ void modoEvaSorObstaculos() {
     delay(DELAY_REVERSA);
     detener();
     delay(DELAY_DETENIDO);
-    left = false; right = false;
-  } 
-  else {
+    left = false;
+    right = false;
+  }
+  else
+  {
     avanzar(); // Si no hay nada al frente, avanza libremente
   }
 }
-
 
 float mirarAlFrente()
 {
@@ -349,40 +355,45 @@ void aplicarVelocidadMotores(int speedA, int speedB)
   ledcWrite(PWM_CHANNEL_B, speedB);
 }
 
-void girarIzquierdaSuave()
+void girarIzquierdaSuave(int speed)
 {
+  if (speed < 0)
+    speed = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+
   Serial.print("Giro suave izquierda...");
-  Serial.println(VELOCIDAD);
+  Serial.println(speed);
 
   if (!movimiento)
     return;
 
-  int base = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+  int base = speed;
   int lenta = max(VELOCIDAD_GIRO_LINEA / 2, base / 3);
   int rapida = base;
 
   aplicarVelocidadMotores(lenta, rapida);
-
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
   digitalWrite(IN4, LOW);
 }
 
-void girarDerechaSuave()
+void girarDerechaSuave(int speed)
 {
+  if (speed < 0)
+    speed = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+
   Serial.print("Giro suave derecha...");
-  Serial.println(VELOCIDAD);
+  Serial.println(speed);
 
   if (!movimiento)
     return;
 
-  int base = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+  int base = speed;
   int lenta = max(VELOCIDAD_GIRO_LINEA / 2, base / 3);
   int rapida = base;
 
+  // Gira suavemente a la derecha con ambos motores hacia adelante
   aplicarVelocidadMotores(rapida, lenta);
-
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
@@ -407,30 +418,39 @@ void cambiarVelocidad(int vel)
 
 void modoManual()
 {
-  // En modo manual, no hace nada - espera órdenes por MQTT
-  // Las órdenes de movimiento vienen vía: avanzar(), retroceder(), girarDerecha(), girarIzquierda(), detener()
+  MODO_ACTUAL = MANUAL;
+  Serial.println("Modo Manual activado.");
+  detener();
 }
 
 void modoEvasor()
 {
   MODO_ACTUAL = EVASOR;
+  Serial.println("Modo Evasor activado.");
 }
 
 void modoSeguidor()
 {
   MODO_ACTUAL = SEGUIDOR;
+  Serial.println("Modo Seguidor activado.");
   modoSeguidorLinea();
 }
 
-void avanzar()
+void avanzar(int speed)
 {
+  if (speed < 0)
+  {
+    speed = VELOCIDAD > 0 ? VELOCIDAD : VELOCIDAD_MINIMA_LINEA;
+  }
   Serial.print("Avanzar...");
-  Serial.println(VELOCIDAD);
+  Serial.println(speed);
 
   if (!movimiento)
     return;
 
-  aplicarVelocidad(VELOCIDAD);
+  int speedA = speed;
+  int speedB = constrain((int)(speed * COMPENSACION_MOTOR_DERECHO), 0, 255);
+  aplicarVelocidadMotores(speedA, speedB);
 
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
@@ -465,8 +485,8 @@ void girarDerecha()
 
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
+  digitalWrite(IN3, LOW);  // CORREGIDO: era HIGH
+  digitalWrite(IN4, HIGH); // CORREGIDO: era LOW
 }
 
 void girarIzquierda()

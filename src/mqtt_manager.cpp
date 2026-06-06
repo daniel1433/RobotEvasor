@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-const char *MQTT_SERVER = "192.168.1.11"; // IP de tu PC
+const char *MQTT_SERVER = "192.168.1.2"; // IP de tu PC
 const int MQTT_PORT = 1883;
 const char *MQTT_USER = "jdpardo";
 const char *MQTT_PASSWORD = "1234567a";
@@ -32,12 +32,28 @@ void iniciarMQTT()
 {
   Serial.println("Iniciando variables MQTT...");
   delay(1000);
+    
   mqttClient.setCallback(callback);
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setSocketTimeout(15);
 }
 
-void loopMQTT()
-{
-}
+// void loopMQTT()
+// {
+//   if (!validarConexionWiFi())
+//   {
+//     return;
+//   }
+
+//   if (!mqttClient.connected())
+//   {
+//     conectarMQTT();
+//   }
+//   else
+//   {
+//     mqttClient.loop();
+//   }
+// }
 
 void conectarMQTT()
 {
@@ -48,40 +64,60 @@ void conectarMQTT()
     return;
   }
 
-  if (millis() - ultimoIntento < 2000)
+  if (millis() - ultimoIntento < 5000)
   {
     return;
   }
 
   ultimoIntento = millis();
 
-  Serial.print("Conectando MQTT...");
+  Serial.println();
+  Serial.print("Heap libre: ");
+  Serial.println(ESP.getFreeHeap());
+  Serial.print("WiFi RSSI: ");
+  Serial.println(WiFi.RSSI());
+  Serial.print("IP ESP32: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Conectando MQTT a ");
+  Serial.print(MQTT_SERVER);
+  Serial.print(":");
+  Serial.print(MQTT_PORT);
+  Serial.print("...");
 
-  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  String clientId = "ESP32_";
+  clientId += String((uint32_t)ESP.getEfuseMac(), HEX);
 
   bool conectado = mqttClient.connect(
-      "ESP32_CLIENT",
+      clientId.c_str(),
       MQTT_USER,
-      MQTT_PASSWORD);
+      MQTT_PASSWORD
+  );
+
+  Serial.print("ClientID: ");
+  Serial.println(clientId);
 
   if (conectado)
   {
-    Serial.println("OK");
+    Serial.println(" OK");
 
     mqttClient.subscribe(TOPIC_SENSORES_ADELANTE);
     mqttClient.subscribe(TOPIC_SENSORES_ATRAS);
     mqttClient.subscribe(TOPIC_SENSORES_DERECHA);
     mqttClient.subscribe(TOPIC_SENSORES_IZQUIERDA);
     mqttClient.subscribe(TOPIC_SENSORES_DETENER);
-  
     mqttClient.subscribe(TOPIC_SENSORES_MODO);
     mqttClient.subscribe(TOPIC_SENSORES_VELOCIDAD);
     mqttClient.subscribe(TOPIC_SERVOMOTOR);
+    
+    Serial.println("Suscripciones OK");
   }
   else
   {
     Serial.print("ERROR rc=");
-    Serial.println(mqttClient.state());
+    Serial.print(mqttClient.state());
+    Serial.print(" (WiFi status: ");
+    Serial.print(WiFi.status());
+    Serial.println(")");
   }
 }
 
@@ -91,6 +127,12 @@ bool validarConexionMQTT()
   {
     Serial.println("Sin conexión wifi");
     return false;
+  }
+
+  if (!mqttClient.connected())
+  {
+      Serial.print("\nMQTT desconectado. Estado=");
+      Serial.println(mqttClient.state());
   }
 
   conectarMQTT();
@@ -180,15 +222,6 @@ void callback(char *topic, byte *payload, unsigned int length)
       return;
     }
 
-    if(mensaje == "DEBUG_SENSOR_IZQ"){
-      debugSensorIzquierdo();
-      return;
-    }
-
-    if(mensaje == "DEBUG_SENSOR_DER"){
-      debugSensorDerecho();
-      return;
-    }
   }
 
   if (String(topic) == TOPIC_SERVOMOTOR)

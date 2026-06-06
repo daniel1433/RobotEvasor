@@ -34,4 +34,5 @@ void enviarMensaje(const char *topic, String mensaje);
 bool validarConexionMQTT();
 void iniciarMQTT();
 void callback(char* topic, byte* payload, unsigned int length);
+// void loopMQTT();
 #endif
